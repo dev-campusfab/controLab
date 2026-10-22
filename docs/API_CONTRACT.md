@@ -52,7 +52,10 @@ d'exiger un serveur joignable depuis l'extérieur côté module :
 }
 ```
 `command` peut valoir `"ENTER_SETUP"`, `"REBOOT"`, `"FACTORY_RESET"`,
-`null`. Le module exécute l'ordre au heartbeat suivant qu'il le reçoit.
+`"RELOAD_CONFIG"`, `null`. Le module exécute l'ordre au heartbeat suivant
+qu'il le reçoit. `RELOAD_CONFIG` signifie que `hwConfig` (voir
+`GET /modules/{moduleId}/hw-config` ci-dessous) a changé côté site depuis la
+dernière lecture — le module est invité à le relire.
 
 ## `POST /modules/{moduleId}/scan`
 
@@ -83,6 +86,68 @@ correspondante (le module sait déjà via `board_config.h` ce qu'il peut
 afficher ; le site n'a pas besoin de connaître les capacités pour construire
 cette réponse — le module trie côté firmware).
 
+## `GET /modules/{moduleId}/hw-config`
+
+> **Côté site : implémenté.** Côté firmware : **pas encore** — cette section
+> est une proposition de contrat à l'intention de l'équipe firmware, écrite
+> en même temps que le site, pas un endpoint déjà consommé en production.
+> Rien ne lit ni n'applique `hwConfig` aujourd'hui côté module.
+
+Pensé pour être appelé par le module une fois au démarrage (après `BOUND_OK`
+ou au passage en `RUNNING`), et de nouveau chaque fois qu'un heartbeat répond
+`command: "RELOAD_CONFIG"` — pas à chaque heartbeat, le contenu ne change que
+quand un admin modifie la configuration matérielle du module sur le site.
+
+Réponse 200 :
+```json
+{
+  "nfc": {
+    "enabled": true,
+    "model": "pn532",
+    "interface": "i2c",
+    "pins": { "sda": 21, "scl": 22, "irq": null, "reset": null }
+  },
+  "led": {
+    "enabled": true,
+    "model": "ws2812",
+    "pin": 5,
+    "count": 12
+  },
+  "screen": {
+    "messages": {
+      "granted": "Bonjour {prenom}",
+      "denied": "Accès refusé",
+      "unknown_card": "Carte inconnue"
+    }
+  }
+}
+```
+
+- `nfc.interface` vaut `"i2c"` (pins `sda`/`scl`, `irq`/`reset` optionnels,
+  `null` si non câblés) ou `"spi"` (pins `sck`/`mosi`/`miso`/`ss` ; la clé
+  `pins` prend alors cette forme à la place — pas les deux en même temps).
+- `led.model` : `"ws2812"`, `"sk6812"` ou `"ws2811"` — un seul fil de
+  données, pas de LED à horloge séparée (type APA102) dans cette v1.
+- `screen.messages.{granted,denied,unknown_card}` : gabarits de texte avec un
+  seul paramètre substituable, `{prenom}` (remplacé par le prénom du membre
+  identifié, vide sinon). Ce sont EXACTEMENT les mêmes textes que
+  `POST /modules/{moduleId}/scan` renvoie déjà dans `message`/`displayText` —
+  cet endpoint ne fait qu'exposer la configuration qui les a produits, il n'y
+  a pas de nouveau champ à gérer côté affichage temps réel, seulement cette
+  lecture de config au démarrage/sur `RELOAD_CONFIG`.
+- Toute section peut être absente (pas encore configurée côté site) : traiter
+  comme `{"enabled": false}` plutôt que comme une erreur.
+- Mêmes garanties que `heartbeat`/`scan` : `Authorization: Bearer
+  {moduleSecret}`, 401 si invalide.
+
+**Ce que le firmware devrait faire pour que ça serve à quelque chose** (hors
+scope du site, pour que l'équipe firmware sache par où commencer) :
+remplacer les constantes de compilation de `board_config.h`
+(`HAS_SCREEN`/pins figées par variante) par une lecture de cette config au
+démarrage, stockée en NVS pour fonctionner même hors-ligne entre deux
+synchronisations — et valider les pins reçues avant de les appliquer (une
+pin invalide ne doit jamais pouvoir planter ou endommager le module).
+
 ## `POST /modules/{moduleId}/enter-setup`
 
 Appelé par le site (authentifié utilisateur, pas par le module) quand un
@@ -101,7 +166,7 @@ nouveau `bindToken` par sécurité).
   si vous voulez éviter qu'une fuite DB le expose en clair — comparaison en
   temps constant).
 - Les endpoints `heartbeat` et `scan` doivent être rapides (<300ms) : le
-  module a un timeout HTTP côté firmware d'environ 5s mais ne doit pas
+  module a un timeout HTTP côté firmware d'environ 15s mais ne doit pas
   bloquer longtemps la lecture NFC suivante.
 - Prévoir un rate-limit raisonnable par module (ex. 1 scan/sec max côté
   serveur) au cas où un module boucle en erreur.
