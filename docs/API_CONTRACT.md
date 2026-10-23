@@ -88,10 +88,12 @@ cette réponse — le module trie côté firmware).
 
 ## `GET /modules/{moduleId}/hw-config`
 
-> **Côté site : implémenté.** Côté firmware : **pas encore** — cette section
-> est une proposition de contrat à l'intention de l'équipe firmware, écrite
-> en même temps que le site, pas un endpoint déjà consommé en production.
-> Rien ne lit ni n'applique `hwConfig` aujourd'hui côté module.
+> **`nfc`/`led`/`screen` : implémentés des deux côtés** (site et firmware —
+> `firmware/src/net/api_client.cpp::getHwConfig()`,
+> `firmware/src/core/hw_config.cpp::applyFromJson()`, persisté en NVS).
+> **`automations` : côté site implémenté, côté firmware PAS ENCORE** — voir
+> plus bas, c'est une proposition de contrat écrite en même temps que le
+> site, pas un comportement déjà consommé en production.
 
 Pensé pour être appelé par le module une fois au démarrage (après `BOUND_OK`
 ou au passage en `RUNNING`), et de nouveau chaque fois qu'un heartbeat répond
@@ -117,9 +119,30 @@ Réponse 200 :
     "messages": {
       "granted": "Bonjour {prenom}",
       "denied": "Accès refusé",
-      "unknown_card": "Carte inconnue"
+      "unknown_card": "Carte inconnue",
+      "outside_schedule": "Hors horaires d'accès"
     }
-  }
+  },
+  "automations": [
+    {
+      "id": "r1",
+      "enabled": true,
+      "trigger": { "type": "on_idle" },
+      "actions": [
+        { "type": "set_color", "color": "#001133", "brightness": 30 }
+      ]
+    },
+    {
+      "id": "r2",
+      "enabled": true,
+      "trigger": { "type": "on_denied_streak", "count": 3, "window_sec": 10 },
+      "actions": [
+        { "type": "blink", "color": "#FF0000", "times": 5, "interval_ms": 200 },
+        { "type": "wait", "ms": 500 },
+        { "type": "set_color", "color": "#001133", "brightness": 30 }
+      ]
+    }
+  ]
 }
 ```
 
@@ -128,25 +151,59 @@ Réponse 200 :
   `pins` prend alors cette forme à la place — pas les deux en même temps).
 - `led.model` : `"ws2812"`, `"sk6812"` ou `"ws2811"` — un seul fil de
   données, pas de LED à horloge séparée (type APA102) dans cette v1.
-- `screen.messages.{granted,denied,unknown_card}` : gabarits de texte avec un
-  seul paramètre substituable, `{prenom}` (remplacé par le prénom du membre
-  identifié, vide sinon). Ce sont EXACTEMENT les mêmes textes que
-  `POST /modules/{moduleId}/scan` renvoie déjà dans `message`/`displayText` —
-  cet endpoint ne fait qu'exposer la configuration qui les a produits, il n'y
-  a pas de nouveau champ à gérer côté affichage temps réel, seulement cette
-  lecture de config au démarrage/sur `RELOAD_CONFIG`.
+- `screen.messages.{granted,denied,unknown_card,outside_schedule}` : gabarits
+  de texte avec un seul paramètre substituable, `{prenom}` (remplacé par le
+  prénom du membre identifié, vide sinon). Ce sont EXACTEMENT les mêmes
+  textes que `POST /modules/{moduleId}/scan` renvoie déjà dans
+  `message`/`displayText` — cet endpoint ne fait qu'exposer la configuration
+  qui les a produits, il n'y a pas de nouveau champ à gérer côté affichage
+  temps réel, seulement cette lecture de config au démarrage/sur
+  `RELOAD_CONFIG`.
 - Toute section peut être absente (pas encore configurée côté site) : traiter
-  comme `{"enabled": false}` plutôt que comme une erreur.
+  comme `{"enabled": false}` (ou `[]` pour `automations`) plutôt que comme
+  une erreur.
 - Mêmes garanties que `heartbeat`/`scan` : `Authorization: Bearer
   {moduleSecret}`, 401 si invalide.
 
+**`automations` — scénarios LED ("Shortcuts" : déclencheur + chaîne
+d'actions), PAS ENCORE interprétés côté firmware.** Vocabulaire fermé
+(volontairement pas d'expression libre — évite d'avoir à écrire un vrai
+parseur de conditions), déjà validé côté site (toute règle/action hors de
+cette liste, ou aux valeurs hors bornes, est supprimée avant stockage) :
+
+Déclencheurs (`trigger.type`) :
+- `on_idle` — aucun scan récent, module au repos.
+- `on_granted` / `on_denied` / `on_unknown_card` — résultat d'un scan.
+- `on_denied_streak` — `count` refus en moins de `window_sec` secondes
+  (`count` 1–20, `window_sec` 1–3600).
+
+Actions (`actions`, exécutées dans l'ordre, séquentiellement) :
+- `set_color` : `color` (`#RRGGBB`), `brightness` (0–100).
+- `blink` : `color`, `times` (1–20), `interval_ms` (20–10000).
+- `breathe` : `color`, `duration_ms` (100–10000) — fondu entrant/sortant.
+- `wait` : `ms` (0–10000) — pause avant l'action suivante de la même règle.
+- `beep` : `times` (1–20) — ignoré si la variante n'a pas de buzzer, même
+  tolérance que `ledColor`/`displayText` plus haut.
+- `turn_off` — éteint la LED.
+
 **Ce que le firmware devrait faire pour que ça serve à quelque chose** (hors
 scope du site, pour que l'équipe firmware sache par où commencer) :
-remplacer les constantes de compilation de `board_config.h`
-(`HAS_SCREEN`/pins figées par variante) par une lecture de cette config au
-démarrage, stockée en NVS pour fonctionner même hors-ligne entre deux
-synchronisations — et valider les pins reçues avant de les appliquer (une
-pin invalide ne doit jamais pouvoir planter ou endommager le module).
+- Pour `nfc`/`led`/`screen` : déjà fait (voir `hw_config.cpp`).
+- Pour `automations` : maintenir un historique court des derniers résultats
+  de scan avec leur horodatage (pour évaluer `on_denied_streak`) et un
+  timestamp "dernier événement" (pour `on_idle`) ; exécuter les actions de
+  façon NON bloquante (scheduler à base de `millis()`, comme le `tick()`
+  existant d'`ui_feedback.cpp` — jamais de `delay()` bloquant dans la boucle
+  principale) ; une seule file d'actions active à la fois (pas de vraie
+  concurrence en v1) — un nouveau déclenchement interrompt proprement la
+  séquence en cours plutôt que de l'empiler ; si aucun scénario ne
+  correspond à un déclencheur donné, garder le comportement actuel codé en
+  dur (`colorForState()`/`showScanResult()`) — rétrocompatible, remplacement
+  progressif plutôt que tout ou rien.
+- Dans tous les cas : valider les pins/valeurs reçues avant de les appliquer
+  (une valeur invalide ne doit jamais pouvoir planter ou endommager le
+  module) — déjà fait côté `hw_config.cpp::isValidPin()`, à reprendre pour
+  les paramètres d'`automations`.
 
 ## `POST /modules/{moduleId}/enter-setup`
 
