@@ -16,12 +16,15 @@ static NimBLECharacteristic* chWifiConfig = nullptr;
 static NimBLECharacteristic* chServerConfig = nullptr;
 static NimBLECharacteristic* chStatus = nullptr;
 static NimBLECharacteristic* chCommand = nullptr;
+static volatile bool shuttingDown = false;
 
 static volatile bool pendingBindFlag = false;
 static PendingBindRequest pendingBindData;
 
 static volatile bool pendingFactoryReset = false;
 static volatile bool pendingReboot = false;
+static volatile bool pendingAdvertisingStop = false;
+static volatile bool pendingAdvertisingRestart = false;
 
 static String buildDeviceInfoJson() {
     JsonDocument doc;
@@ -70,9 +73,15 @@ class SetupCallbacks : public NimBLECharacteristicCallbacks {
 
         if (c == chWifiConfig) {
             JsonDocument doc;
-            if (deserializeJson(doc, v)) return;
+            if (deserializeJson(doc, v)) {
+                Serial.println("[BLE] WifiConfig: JSON invalide, valeur brute recue:");
+                Serial.println(v.c_str());
+                return;
+            }
             String ssid = doc["ssid"] | "";
             String pass = doc["password"] | "";
+            Serial.printf("[BLE] WifiConfig recu: ssid=\"%s\" (len=%d), password len=%d\n",
+                          ssid.c_str(), ssid.length(), pass.length());
             if (ssid.length() == 0) return;
             storage::setWifiCredentials(ssid, pass);
             return;
@@ -108,12 +117,49 @@ class SetupCallbacks : public NimBLECharacteristicCallbacks {
 
 static SetupCallbacks setupCallbacks;
 
+class ServerCallbacks : public NimBLEServerCallbacks {
+    // Un seul client à la fois : une deuxième connexion simultanée (ex. un
+    // appairage Bluetooth système de l'OS en plus de la session Web
+    // Bluetooth du site) peut faire planter NimBLE-Arduino (bug connu,
+    // h2zero/NimBLE-Arduino#160). On coupe l'advertising dès qu'un client
+    // est connecté, on la relance à la déconnexion.
+    //
+    // Important : on ne touche pas à l'advertising ICI directement.
+    // onConnect/onDisconnect tournent dans le contexte du host task NimBLE,
+    // et y appeler des fonctions de la stack (start/stop) de façon
+    // synchrone a provoqué un crash (InstrFetchProhibited dans
+    // NimBLEDevice::host_task) à la reconnexion suivante. On se contente de
+    // lever un drapeau, exécuté ensuite depuis la boucle principale
+    // (loopTask(), appelée depuis main.cpp, hors contexte host task).
+    void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+        (void)pServer;
+        (void)connInfo;
+        pendingAdvertisingStop = true;
+    }
+
+    void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
+        (void)pServer;
+        (void)connInfo;
+        (void)reason;
+        // Pas de nouvelle advertisement si on est en train de tout arrêter
+        // (bind réussi, ble_provisioning::stop() en cours) ; sinon on
+        // redevient découvrable pour un nouvel essai.
+        if (!shuttingDown) {
+            pendingAdvertisingRestart = true;
+        }
+    }
+};
+
+static ServerCallbacks serverCallbacks;
+
 void begin() {
+    shuttingDown = false;
     String moduleId = storage::getOrCreateModuleId();
     String advName = String(BLE_ADV_NAME_PREFIX) + moduleId.substring(moduleId.length() - 6);
 
     NimBLEDevice::init(advName.c_str());
     server = NimBLEDevice::createServer();
+    server->setCallbacks(&serverCallbacks, false);
 
     NimBLEService* service = server->createService(BLE_SETUP_SERVICE_UUID);
 
@@ -137,6 +183,12 @@ void begin() {
         BLE_CHAR_COMMAND_UUID, NIMBLE_PROPERTY::WRITE);
     chCommand->setCallbacks(&setupCallbacks);
 
+    // Obligatoire sur NimBLE-Arduino 2.3.x (pas de no-op comme en 2.5.x) :
+    // sans ça le service n'est jamais réellement enregistré sur le serveur
+    // GATT ("GATT Server started without service... Service not started"),
+    // invisible depuis le client malgré l'advertising.
+    service->start();
+
     // Le paquet d'advertising BLE classique est limité à 31 octets : l'UUID
     // de service 128 bits (18 octets avec son en-tête) + le nom complet
     // (~25 octets) dépassent cette limite ensemble ("Data length exceeded").
@@ -157,6 +209,7 @@ void begin() {
 }
 
 void stop() {
+    shuttingDown = true;
     NimBLEDevice::getAdvertising()->stop();
     NimBLEDevice::deinit(true);
     server = nullptr;
@@ -173,6 +226,14 @@ PendingBindRequest consumePendingBind() {
 }
 
 void loopTask() {
+    if (pendingAdvertisingStop) {
+        pendingAdvertisingStop = false;
+        NimBLEDevice::getAdvertising()->stop();
+    }
+    if (pendingAdvertisingRestart) {
+        pendingAdvertisingRestart = false;
+        NimBLEDevice::getAdvertising()->start();
+    }
     if (pendingReboot) {
         delay(200);
         ESP.restart();

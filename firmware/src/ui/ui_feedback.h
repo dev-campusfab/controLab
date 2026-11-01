@@ -25,4 +25,15 @@ void tick();
 // pour que l'utilisateur sache que l'appui est pris en compte.
 void showFactoryResetHold(float progress);
 
+// Message affiché brièvement au démarrage (avant d'entrer dans l'état
+// SETUP/CONNECTING/RUNNING normal) pour confirmer que le boot s'est bien
+// passé. N'attend pas elle-même : c'est à l'appelant de laisser le message
+// affiché le temps voulu (voir main.cpp).
+void showBootOk();
+
+// Reconstruit l'anneau de LEDs à partir de hw_config::led() (pins/nombre
+// peuvent changer après un RELOAD_CONFIG). No-op si la variante n'a pas
+// d'anneau de LEDs.
+void reloadLedConfig();
+
 } // namespace ui_feedback

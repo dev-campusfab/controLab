@@ -110,6 +110,11 @@ const CHAR_COMMAND = "6c6f6c61-0006-4a3b-9c2e-5f3a1b2c0001";
 
 const device = await navigator.bluetooth.requestDevice({
   filters: [{ services: [SETUP_SERVICE] }],
+  // IMPORTANT : `filters` ne sert qu'à sélectionner l'appareil dans la popup.
+  // Sans lister explicitement le service ici aussi, Chrome bloque l'accès
+  // au GATT après connexion avec une erreur du type "No Services matching
+  // UUID ... found in Device", même si le service existe bien sur l'appareil.
+  optionalServices: [SETUP_SERVICE],
 });
 const server = await device.gatt.connect();
 const service = await server.getPrimaryService(SETUP_SERVICE);

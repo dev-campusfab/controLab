@@ -23,8 +23,13 @@ struct ScanResult {
 
 struct HeartbeatResult {
     bool ok = false;
-    String command;          // "ENTER_SETUP" | "REBOOT" | "FACTORY_RESET" | ""
+    String command;          // "ENTER_SETUP" | "REBOOT" | "FACTORY_RESET" | "RELOAD_CONFIG" | ""
     uint32_t scanPollIntervalMs = 150;
+};
+
+struct HwConfigResult {
+    bool ok = false;
+    String json; // corps brut, parsé par hw_config::applyFromJson
 };
 
 BindResult bind(const String& apiBaseUrl, const String& moduleId, const String& bindToken);
@@ -34,5 +39,8 @@ ScanResult reportScan(const String& apiBaseUrl, const String& moduleId,
 
 HeartbeatResult heartbeat(const String& apiBaseUrl, const String& moduleId,
                           const String& moduleSecret, float batteryPercent /* -1 si N/A */);
+
+HwConfigResult getHwConfig(const String& apiBaseUrl, const String& moduleId,
+                           const String& moduleSecret);
 
 } // namespace api_client

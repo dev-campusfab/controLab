@@ -1,6 +1,6 @@
 #include "storage.h"
 #include <Preferences.h>
-#include <WiFi.h>
+#include <esp_mac.h>
 
 namespace storage {
 
@@ -17,8 +17,24 @@ String getOrCreateModuleId() {
         return cached;
     }
 
-    uint8_t mac[6];
-    WiFi.macAddress(mac);
+    // esp_read_mac() lit directement l'eFuse : contrairement à
+    // WiFi.macAddress(), elle ne dépend pas du driver WiFi déjà initialisé.
+    // Appelée ici (très tôt au boot, avant tout WiFi.mode()), WiFi.macAddress()
+    // peut renvoyer une adresse à zéro sur certains cores si le driver n'a
+    // jamais été démarré — bug vécu en test : le moduleId "s3-000000" en
+    // résultant reste ensuite caché en NVS pour toujours (un factory reset
+    // ne le recalcule pas, par design), rendant le module impossible à
+    // réappairer correctement. D'où l'importance de ne jamais mettre en
+    // cache un MAC manifestement invalide (tout à zéro).
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    bool allZero = (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) == 0;
+    if (allZero) {
+        // Mieux vaut ne rien mettre en cache et réessayer au prochain appel
+        // (prochain reboot) qu'un id bidon figé définitivement.
+        return "s3-unknown";
+    }
+
     char buf[16];
     snprintf(buf, sizeof(buf), "s3-%02x%02x%02x", mac[3], mac[4], mac[5]);
     String id(buf);

@@ -3,6 +3,7 @@
 
 #if HAS_LED_RING
   #include <Adafruit_NeoPixel.h>
+  #include "../core/hw_config.h"
 #endif
 
 #if HAS_SCREEN
@@ -13,7 +14,8 @@
 namespace ui_feedback {
 
 #if HAS_LED_RING
-static Adafruit_NeoPixel ring(LED_RING_COUNT, PIN_LED_RING_DATA, NEO_GRB + NEO_KHZ800);
+static Adafruit_NeoPixel* ring = nullptr;
+static int ringCount = 0;
 #endif
 
 #if HAS_SCREEN
@@ -29,34 +31,53 @@ static core::State currentState = core::State::BOOT;
 #if HAS_LED_RING
 static uint32_t colorForState(core::State s) {
     switch (s) {
-        case core::State::SETUP: return ring.Color(0, 60, 255);      // bleu
-        case core::State::CONNECTING: return ring.Color(255, 160, 0); // orange
-        case core::State::BINDING: return ring.Color(255, 160, 0);
-        case core::State::RUNNING: return ring.Color(0, 90, 0);      // vert faible (idle)
-        case core::State::ERROR: return ring.Color(200, 0, 0);       // rouge
-        default: return ring.Color(40, 40, 40);
+        case core::State::SETUP: return ring->Color(0, 60, 255);      // bleu
+        case core::State::CONNECTING: return ring->Color(255, 160, 0); // orange
+        case core::State::BINDING: return ring->Color(255, 160, 0);
+        case core::State::RUNNING: return ring->Color(0, 90, 0);      // vert faible (idle)
+        case core::State::ERROR: return ring->Color(200, 0, 0);       // rouge
+        default: return ring->Color(40, 40, 40);
     }
 }
 
 static uint32_t hexToColor(const String& hex) {
     // "#RRGGBB" -> couleur NeoPixel. Retombe sur blanc si format invalide.
-    if (hex.length() != 7 || hex[0] != '#') return ring.Color(255, 255, 255);
+    if (hex.length() != 7 || hex[0] != '#') return ring->Color(255, 255, 255);
     long rgb = strtol(hex.c_str() + 1, nullptr, 16);
-    return ring.Color((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+    return ring->Color((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
 }
 
 static void fill(uint32_t color) {
-    for (int i = 0; i < LED_RING_COUNT; i++) ring.setPixelColor(i, color);
-    ring.show();
+    if (!ring) return;
+    for (int i = 0; i < ringCount; i++) ring->setPixelColor(i, color);
+    ring->show();
+}
+
+// Construit (ou reconstruit) l'anneau à partir de hw_config::led() — appelé
+// au boot et à chaque fois qu'une nouvelle config matérielle est reçue du
+// site (commande RELOAD_CONFIG, voir docs/API_CONTRACT.md).
+static void reconfigureLedRing() {
+    if (ring) {
+        delete ring;
+        ring = nullptr;
+        ringCount = 0;
+    }
+
+    const hw_config::LedConfig& cfg = hw_config::led();
+    if (!cfg.enabled) return;
+
+    ring = new Adafruit_NeoPixel(cfg.count, cfg.pin, NEO_GRB + NEO_KHZ800);
+    ringCount = cfg.count;
+    ring->begin();
+    ring->setBrightness(80);
+    ring->clear();
+    ring->show();
 }
 #endif
 
 void begin() {
 #if HAS_LED_RING
-    ring.begin();
-    ring.setBrightness(80);
-    ring.clear();
-    ring.show();
+    reconfigureLedRing();
 #endif
 #if HAS_STATUS_LED
     pinMode(PIN_STATUS_LED, OUTPUT);
@@ -71,6 +92,14 @@ void begin() {
     screen.setFont(u8g2_font_6x10_tf);
 #endif
 }
+
+#if HAS_LED_RING
+void reloadLedConfig() {
+    reconfigureLedRing();
+}
+#else
+void reloadLedConfig() {}
+#endif
 
 static void renderScreenState(core::State s, core::ErrorCode e) {
 #if HAS_SCREEN
@@ -93,7 +122,7 @@ void showState(core::State state, core::ErrorCode error) {
     currentState = state;
     renderScreenState(state, error);
 #if HAS_LED_RING
-    fill(colorForState(state));
+    if (ring) fill(colorForState(state));
 #elif HAS_STATUS_LED
     digitalWrite(PIN_STATUS_LED, state == core::State::RUNNING ? HIGH : LOW);
 #endif
@@ -117,15 +146,17 @@ void showScanResult(const String& result, const String& message,
 #endif
 
 #if HAS_LED_RING
-    uint32_t color;
-    if (ledColorHex.length() > 0) {
-        color = hexToColor(ledColorHex);
-    } else if (result == "granted") {
-        color = ring.Color(0, 200, 0);
-    } else {
-        color = ring.Color(200, 0, 0);
+    if (ring) {
+        uint32_t color;
+        if (ledColorHex.length() > 0) {
+            color = hexToColor(ledColorHex);
+        } else if (result == "granted") {
+            color = ring->Color(0, 200, 0);
+        } else {
+            color = ring->Color(200, 0, 0);
+        }
+        fill(color);
     }
-    fill(color);
 #elif HAS_STATUS_LED
     (void)ledColorHex;
     digitalWrite(PIN_STATUS_LED, result == "granted" ? HIGH : LOW);
@@ -151,16 +182,38 @@ void showFactoryResetHold(float progress) {
 
 #if HAS_LED_RING
     // Anneau qui se remplit de rouge au fur et à mesure de l'appui.
-    int litCount = (int)(progress * LED_RING_COUNT);
-    for (int i = 0; i < LED_RING_COUNT; i++) {
-        ring.setPixelColor(i, i < litCount ? ring.Color(200, 0, 0) : ring.Color(0, 0, 0));
+    if (ring) {
+        int litCount = (int)(progress * ringCount);
+        for (int i = 0; i < ringCount; i++) {
+            ring->setPixelColor(i, i < litCount ? ring->Color(200, 0, 0) : ring->Color(0, 0, 0));
+        }
+        ring->show();
     }
-    ring.show();
 #elif HAS_STATUS_LED
     // Clignotement qui accélère à mesure qu'on approche du seuil.
     uint32_t now = millis();
     uint32_t period = 400 - (uint32_t)(progress * 350);
     digitalWrite(PIN_STATUS_LED, (now / (period / 2 + 1)) % 2 == 0 ? HIGH : LOW);
+#endif
+}
+
+void showBootOk() {
+#if HAS_SCREEN
+    screen.clearBuffer();
+    screen.setCursor(0, 12);
+    screen.print("ControLab");
+    screen.setCursor(0, 28);
+    screen.print("Carte relancee OK");
+    screen.sendBuffer();
+#endif
+
+#if HAS_LED_RING
+    if (ring) {
+        for (int i = 0; i < ringCount; i++) ring->setPixelColor(i, ring->Color(0, 200, 0));
+        ring->show();
+    }
+#elif HAS_STATUS_LED
+    digitalWrite(PIN_STATUS_LED, HIGH);
 #endif
 }
 
@@ -175,9 +228,9 @@ void tick() {
         digitalWrite(PIN_STATUS_LED, blinkOn ? HIGH : LOW);
     }
 #elif HAS_LED_RING
-    if (currentState == core::State::SETUP || currentState == core::State::CONNECTING ||
-        currentState == core::State::BINDING) {
-        fill(blinkOn ? colorForState(currentState) : ring.Color(0, 0, 0));
+    if (ring && (currentState == core::State::SETUP || currentState == core::State::CONNECTING ||
+                 currentState == core::State::BINDING)) {
+        fill(blinkOn ? colorForState(currentState) : ring->Color(0, 0, 0));
     }
 #endif
 }

@@ -6,7 +6,10 @@
 
 namespace api_client {
 
-static const uint32_t HTTP_TIMEOUT_MS = 5000;
+// 5s était trop court pour un premier appel HTTPS (négociation TLS incluse,
+// potentiellement un cold start du serveur) : provoquait un read Timeout
+// (-11) même quand le WiFi et le serveur allaient bien.
+static const uint32_t HTTP_TIMEOUT_MS = 15000;
 
 static void applyAuthHeader(HTTPClient& http, const String& moduleSecret) {
     http.addHeader("Authorization", "Bearer " + moduleSecret);
@@ -117,6 +120,30 @@ HeartbeatResult heartbeat(const String& apiBaseUrl, const String& moduleId,
             res.command = resp["command"] | "";
             res.scanPollIntervalMs = resp["scanPollIntervalMs"] | 150;
         }
+        Serial.printf("[API] heartbeat OK (200)\n");
+    } else {
+        Serial.printf("[API] heartbeat echec, code HTTP=%d (401=secret invalide -> rebind necessaire)\n", code);
+    }
+    http.end();
+    return res;
+}
+
+HwConfigResult getHwConfig(const String& apiBaseUrl, const String& moduleId,
+                           const String& moduleSecret) {
+    HwConfigResult res;
+    HTTPClient http;
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    if (!http.begin(apiBaseUrl + "/modules/" + moduleId + "/hw-config")) {
+        return res;
+    }
+    http.addHeader("Authorization", "Bearer " + moduleSecret);
+
+    int code = http.GET();
+    if (code == 200) {
+        res.ok = true;
+        res.json = http.getString();
+    } else {
+        Serial.printf("[API] hw-config echec, code HTTP=%d\n", code);
     }
     http.end();
     return res;

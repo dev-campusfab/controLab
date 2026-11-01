@@ -1,10 +1,8 @@
 #include <Arduino.h>
 #include "../include/board_config.h"
-#if HAS_NFC
-#include <Wire.h>
-#endif
 #include "core/storage.h"
 #include "core/state_machine.h"
+#include "core/hw_config.h"
 #include "ble/ble_provisioning.h"
 #include "net/wifi_manager.h"
 #include "net/api_client.h"
@@ -78,10 +76,32 @@ static void enterSetupMode() {
     ble_provisioning::begin();
 }
 
+// Récupère GET /modules/{id}/hw-config (voir docs/API_CONTRACT.md), applique
+// la config reçue (validée et persistée en NVS par hw_config) puis
+// réinitialise le NFC et l'anneau de LEDs en conséquence. Appelé une fois à
+// l'entrée en RUNNING, et à nouveau si un heartbeat répond RELOAD_CONFIG.
+// En cas d'échec réseau, on réapplique simplement la config déjà connue
+// (NVS ou valeurs compilées) : le module reste utilisable hors-ligne.
+static void syncHwConfig() {
+    String apiBaseUrl = storage::getApiBaseUrl();
+    String moduleId = storage::getOrCreateModuleId();
+    String secret = storage::getModuleSecret();
+
+    api_client::HwConfigResult res = api_client::getHwConfig(apiBaseUrl, moduleId, secret);
+    if (res.ok) {
+        hw_config::applyFromJson(res.json);
+    }
+
+    nfc_reader::begin();
+    ui_feedback::reloadLedConfig();
+}
+
 static void attemptBindAndRun(const String& apiBaseUrl, const String& bindToken) {
     core::setState(core::State::CONNECTING);
     String ssid = storage::getWifiSsid();
     String pass = storage::getWifiPassword();
+    Serial.printf("[WiFi] Tentative de connexion a ssid=\"%s\"\n", ssid.c_str());
+    wifi_manager::debugScanAndPrint();
 
     if (!wifi_manager::connect(ssid, pass)) {
         core::setError(core::ErrorCode::WIFI_TIMEOUT);
@@ -107,25 +127,24 @@ static void attemptBindAndRun(const String& apiBaseUrl, const String& bindToken)
     storage::setBound(true);
     core::setState(core::State::RUNNING);
     ble_provisioning::stop();
-    nfc_reader::begin();
+    syncHwConfig();
 }
 
 void setup() {
     Serial.begin(115200);
     storage::begin();
-#if HAS_NFC
-    // IMPORTANT : ne PAS appeler Wire.begin() ici. Sur Arduino-ESP32 3.x (le
-    // nouveau driver I2C "-ng"), un second Wire.begin() déclenché en interne
-    // par une lib (Adafruit_PN532 l'appelle sans arguments dans son propre
-    // begin()) ne se contente pas d'un warning "Bus already started" : le
-    // bus reste dans un état invalide et toutes les transactions suivantes
-    // échouent (ESP_ERR_INVALID_STATE en boucle). Wire.setPins() mémorise
-    // les pins sans démarrer le bus ; le begin() de la lib NFC juste après
-    // les utilisera, et un seul begin() réel a lieu au total.
-    Wire.setPins(PIN_I2C_SDA, PIN_I2C_SCL);
-#endif
+    // Charge la config NVS (ou les valeurs compilées de board_config.h si
+    // rien n'a encore été synchronisé) avant tout ce qui en dépend
+    // (ui_feedback::begin() construit l'anneau de LEDs à partir de ça).
+    hw_config::begin();
     ui_feedback::begin();
     pinMode(PIN_SETUP_BUTTON, INPUT_PULLUP);
+
+    // Confirmation visuelle de boot, affichée avant tout le reste (BLE,
+    // WiFi...) pour que ce soit visible même si la suite plante vite.
+    ui_feedback::showBootOk();
+    delay(3000);
+
     core::onStateChangeCallback(onStateChanged);
 
     if (!storage::isBound() || !storage::hasWifiCredentials()) {
@@ -137,7 +156,7 @@ void setup() {
     core::setState(core::State::CONNECTING);
     if (wifi_manager::connect(storage::getWifiSsid(), storage::getWifiPassword())) {
         core::setState(core::State::RUNNING);
-        nfc_reader::begin();
+        syncHwConfig();
     } else {
         core::setError(core::ErrorCode::WIFI_TIMEOUT);
         // On ouvre quand même le BLE pour permettre une reconfiguration WiFi
@@ -182,6 +201,8 @@ static void runningLoop() {
                 ESP.restart();
             } else if (hb.command == "ENTER_SETUP") {
                 enterSetupMode();
+            } else if (hb.command == "RELOAD_CONFIG") {
+                syncHwConfig();
             }
         }
     }
